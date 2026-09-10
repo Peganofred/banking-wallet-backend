@@ -93,15 +93,21 @@ public class WalletService {
         }
 
         try {
-            // 3) PESSIMISTIC row lock: blocks concurrent writes to the same wallet.
-            //    Ownership check happens on THIS locked instance (no stale cache).
-            Wallet wallet = walletRepository.findByIdForUpdate(walletId)
+            // 3) OWNERSHIP check (plain read).
+            Wallet wallet = walletRepository.findById(walletId)
                     .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
             verifyOwner(wallet, actor);
 
-            BigDecimal newBalance = wallet.getBalance().add(request.getAmount());
-            wallet.setBalance(newBalance);
-            walletRepository.save(wallet);
+            // 4) ATOMIC credit: single SQL statement, row-locked by PG itself.
+            int rows = walletRepository.credit(walletId, request.getAmount());
+            if (rows == 0) {
+                throw new ResourceNotFoundException("Wallet not found with id: " + walletId);
+            }
+
+            // 5) Re-read the fresh balance for the audit row.
+            BigDecimal newBalance = walletRepository.findById(walletId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId))
+                    .getBalance();
 
             Transaction transaction = Transaction.builder()
                     .wallet(wallet)
@@ -150,19 +156,31 @@ public class WalletService {
         }
 
         try {
-            Wallet wallet = walletRepository.findByIdForUpdate(walletId)
+            // 3) OWNERSHIP check (plain read, no lock needed for the owner bit).
+            Wallet wallet = walletRepository.findById(walletId)
                     .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
             verifyOwner(wallet, actor);
 
-            if (wallet.getBalance().compareTo(request.getAmount()) < 0) {
-                throw new InsufficientBalanceException(
-                        "Insufficient balance: have " + wallet.getBalance()
-                                + ", need " + request.getAmount());
+            // 4) ATOMIC debit: the whole "check balance + subtract" happens in ONE
+            //    SQL statement. PostgreSQL locks the row for the statement, so
+            //    concurrent withdraws serialize at the DB and can never both
+            //    pass the balance guard at once (no lost updates, no overdraw).
+            int rows = walletRepository.debitIfSufficient(walletId, request.getAmount());
+            if (rows == 0) {
+                Wallet fresh = walletRepository.findById(walletId)
+                        .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
+                if (fresh.getBalance().compareTo(request.getAmount()) < 0) {
+                    throw new InsufficientBalanceException(
+                            "Insufficient balance: have " + fresh.getBalance()
+                                    + ", need " + request.getAmount());
+                }
+                throw new InvalidRequestException("Could not withdraw amount " + request.getAmount());
             }
 
-            BigDecimal newBalance = wallet.getBalance().subtract(request.getAmount());
-            wallet.setBalance(newBalance);
-            walletRepository.save(wallet);
+            // 5) Re-read the fresh balance for the audit row.
+            BigDecimal newBalance = walletRepository.findById(walletId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId))
+                    .getBalance();
 
             Transaction transaction = Transaction.builder()
                     .wallet(wallet)

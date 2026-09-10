@@ -1,12 +1,12 @@
 package com.wallet.wallet;
 
-import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 
@@ -17,17 +17,29 @@ public interface WalletRepository extends JpaRepository<Wallet, Long> {
     List<Wallet> findAllByUserId(Long userId);
 
     /**
-     * PESSIMISTIC (row) locking:
-     * SELECT ... FOR UPDATE on the wallet row.
+     * ATOMIC debit with a balance guard.
+     * SQL: UPDATE wallets SET balance = balance - :amount
+     *      WHERE id = :id AND balance >= :amount
      *
-     * While this transaction holds the lock:
-     * - Another concurrent deposit/withdraw/transfer on the SAME wallet
-     *   will BLOCK and wait here (no lost updates, no negative balances).
+     * PostgreSQL turns this into a single atomic row-locking statement:
+     * the row is locked as part of the UPDATE itself, so two concurrent
+     * debits SERIALIZE at the database. The balance guard prevents
+     * overdraw even under perfect concurrency.
      *
-     * This is the classic choice for financial writes where correctness
-     * matters more than throughput.
+     * Returns the number of rows updated:
+     *   1  -> money debited
+     *   0  -> wallet does not exist OR insufficient balance
      */
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select w from Wallet w where w.id = :id")
-    Optional<Wallet> findByIdForUpdate(@Param("id") Long id);
+    @Modifying
+    @Query(value = "update wallets set balance = balance - :amount " +
+            "where id = :id and balance >= :amount", nativeQuery = true)
+    int debitIfSufficient(@Param("id") Long id, @Param("amount") BigDecimal amount);
+
+    /**
+     * ATOMIC credit: balance = balance + :amount.
+     * Returns number of rows updated (1 = success, 0 = wallet missing).
+     */
+    @Modifying
+    @Query(value = "update wallets set balance = balance + :amount where id = :id", nativeQuery = true)
+    int credit(@Param("id") Long id, @Param("amount") BigDecimal amount);
 }

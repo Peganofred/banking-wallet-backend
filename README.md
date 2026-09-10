@@ -137,6 +137,7 @@ Authorization: Bearer <your_token>
 |--------|----------------------------|------|------------------------|------------------|
 | POST   | `/api/v1/wallets/{id}/deposit`  | JWT  | **required**           | Add money        |
 | POST   | `/api/v1/wallets/{id}/withdraw` | JWT  | **required**           | Take out money   |
+| POST   | `/api/v1/transfers`              | JWT  | **required**           | Send to another user |
 
 Body:
 ```json
@@ -159,14 +160,30 @@ Two layers of defence:
 2. **Database**: unique constraint on `(wallet_id, idempotency_key)` - final authority
    even if Redis misses.
 
-### Concurrency (locking)
+### Concurrency (atomic updates)
 
-- **Pessimistic locking**: `WalletRepository.findByIdForUpdate` issues
-  `SELECT ... FOR UPDATE`. Concurrent writes to the same wallet are serialized -
-  no lost updates, no negative balances. Used in deposit/withdraw/transfer.
-- **Optimistic locking**: Wallet has `@Version`. Every update bumps the version.
-  If a stale entity is updated -> `OptimisticLockException` (409). This is a safety
-  net on top of the pessimistic lock.
+Banking-standard approach: **single-statement atomic SQL updates** instead of read-then-write:
+
+- **Debit** (withdraw / transfer sender):
+  ```sql
+  UPDATE wallets SET balance = balance - :amount
+  WHERE id = :id AND balance >= :amount
+  ```
+  The `balance >= :amount` guard makes the check + deduction atomic in one
+  statement — no read window for a concurrent writer to interfere.
+
+- **Credit** (deposit / transfer receiver):
+  ```sql
+  UPDATE wallets SET balance = balance + :amount WHERE id = :id
+  ```
+
+- **Transfer** (two wallets in one tx): debit + credit + 2 audit rows in a
+  single `@Transactional`. Deadlock-free ordering: the LOWER wallet id is
+  always touched first, so concurrent transfers (A→B and B→A) never lock
+  rows in opposite order.
+
+Redis idempotency (`IdempotencyService`) + DB unique constraint on
+`(wallet_id, idempotency_key)` are retained as duplicate guards.
 
 ### Phase 2 Postman tests
 
@@ -230,13 +247,108 @@ Custom exceptions -> HTTP status mapping:
 | ResourceNotFoundException    | 404 Not Found | wallet/user not found                       |
 | InvalidRequestException      | 400 Bad Req   | bad amount, negative balance, etc.          |
 | DuplicateResourceException   | 409 Conflict  | duplicate email / already has wallet        |
-| InsufficientBalanceException | 400 Bad Req   | (Phase 2) not enough balance                |
+| InsufficientBalanceException | 400 Bad Req   | (Phase 2/3) not enough balance              |
 | AccessDeniedException        | 403 Forbidden | (our check) not wallet owner                |
 | BadCredentialsException      | 401 Unauthorized | wrong login credentials                 |
 | Missing/invalid JWT          | 401 Unauthorized | no/bad token (custom entry point)       |
 | Spring AccessDenied          | 403 Forbidden | security-level permission                   |
 | MethodArgumentNotValid       | 400 Bad Req   | @Valid failures (fieldErrors populated)     |
 | Any other Exception          | 500           | unexpected (no internals leaked)            |
+
+---
+
+## Phase 3 - Money Transfer (User-to-User)
+
+### New endpoint
+
+| Method | URL                    | Auth | Idempotency-Key Header | Description                     |
+|--------|------------------------|------|------------------------|---------------------------------|
+| POST   | `/api/v1/transfers`    | JWT  | **required**           | Transfer money to another user  |
+
+Body:
+```json
+{
+  "toWalletId": 2,
+  "amount": 100,
+  "description": "pay dinner"
+}
+```
+
+Response (200):
+```json
+{
+  "id": 5,
+  "walletId": 1,
+  "type": "TRANSFER_OUT",
+  "status": "SUCCESS",
+  "amount": 100.00,
+  "balanceAfter": 900.00,
+  "idempotencyKey": "tx-001",
+  "description": "pay dinner",
+  "createdAt": "2026-09-10T12:30:00.123"
+}
+```
+
+Two transaction rows are created atomically (TRANSFER_OUT + TRANSFER_IN)
+in a single `@Transactional` — money is always conserved.
+
+### Validations
+
+| Scenario                    | HTTP  | Message                                      |
+|-----------------------------|-------|----------------------------------------------|
+| Insufficient balance        | 400   | `Insufficient balance: have X, need Y`       |
+| Transfer to self            | 400   | `Cannot transfer to the same wallet`         |
+| Recipient wallet not found  | 404   | `Wallet not found with id: N`               |
+| Negative amount             | 400   | `Amount must be greater than zero`           |
+| Missing Idempotency-Key     | 400   | `Required request header 'Idempotency-Key'`  |
+| Same key replay             | 200   | Returns original transaction, no balance change |
+
+### How transfers stay race-free
+
+1. **Atomic conditional UPDATE** — debit uses:
+   ```sql
+   UPDATE wallets SET balance = balance - :amount
+   WHERE id = :id AND balance >= :amount
+   ```
+   Check + deduction happen in one SQL statement — no read window for
+   a concurrent writer to interfere.
+
+2. **Deadlock-free ordering** — the lower wallet ID is always touched
+   first, so concurrent A→B and B→A transfers always lock rows in the
+   same ascending order. No deadlock possible.
+
+3. **Idempotency** — Redis + DB unique constraint `(wallet_id, idempotency_key)`
+   prevent double-execution on retries.
+
+### Phase 3 Postman tests
+
+1. **Basic transfer** (Alice w1=1000 → Bob w2=0):
+   - POST `/api/v1/transfers` (Alice's token, key `tx-001`)
+   - Body: `{"toWalletId": 2, "amount": 250, "description": "lunch"}`
+   - Expected 200: `balanceAfter: 750.00`, type `TRANSFER_OUT`
+   - GET `/wallets/2` (Bob) -> balance 250.00
+
+2. **Idempotency replay**:
+   - Re-send same request (same key `tx-001`)
+   - Expected: SAME transaction returned, balances unchanged
+
+3. **Insufficient balance**:
+   - Transfer `{"amount": 5000}` (w1 only has 750)
+   - Expected **400**: `"Insufficient balance: have 750.00, need 5000"`
+
+4. **Self-transfer**:
+   - Alice sends to her own wallet 1
+   - Expected **400**: `"Cannot transfer to the same wallet"`
+
+5. **Wrong owner**:
+   - Bob's token, send from wallet 1 (Alice's)
+   - Expected **403**
+
+6. **Concurrent bidirectional** (advanced):
+   - Deposit 1000 to both wallets
+   - Fire 5 transfers A→B and 5 transfers B→A simultaneously
+   - All should return 200
+   - Balances should still sum to original total (conservation check)
 
 All handled centrally in:
 - `exception/GlobalExceptionHandler.java` (@RestControllerAdvice)
@@ -253,5 +365,7 @@ src/main/java/com/wallet/
 ├── exception/       ApiError, ApiException, GlobalExceptionHandler, custom exceptions
 ├── security/        JwtService, JwtAuthFilter, CustomUserDetailsService, RestAuthErrorHandlers
 ├── user/            User, Role, AuthDtos, UserDto, AuthService, AuthController, UserRepository
-└── wallet/          Wallet, WalletDtos, WalletService, WalletController, WalletRepository
+├── wallet/          Wallet, WalletDtos, WalletService, WalletController, WalletRepository
+├── transaction/     Transaction, TransactionType, TransactionRepository
+└── transfer/        TransferRequest, TransferService, TransferController
 ```

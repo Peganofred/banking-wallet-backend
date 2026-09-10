@@ -34,16 +34,6 @@ public class Wallet {
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
-    /**
-     * OPTIMISTIC LOCKING:
-     * This field is incremented by Hibernate on every UPDATE.
-     * If two requests try to update the same row at the same time,
-     * the first one succeeds, the second gets OptimisticLockException (409).
-     * This is our first line of defence against lost updates / race conditions.
-     */
-    @Version
-    private Long version;
-
     @PrePersist
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();
