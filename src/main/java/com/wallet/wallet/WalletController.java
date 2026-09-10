@@ -1,11 +1,14 @@
 package com.wallet.wallet;
 
 import com.wallet.exception.AccessDeniedException;
+import com.wallet.exception.InvalidRequestException;
+import com.wallet.transaction.TransactionResponse;
 import com.wallet.user.User;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -50,13 +53,51 @@ public class WalletController {
             @PathVariable Long id,
             @AuthenticationPrincipal User user) {
         WalletDtos.WalletResponse wallet = walletService.getWallet(id);
-        if (!wallet.getUserId().equals(user.getId()) && !isAdmin(user)) {
-            throw new AccessDeniedException("You are not allowed to access this wallet");
-        }
+        verifyAccess(wallet.getUserId(), user);
         return ResponseEntity.ok(wallet);
     }
 
-    private boolean isAdmin(User user) {
-        return user.getRole().name().equals("ADMIN");
+    /**
+     * DEPOSIT money into a wallet.
+     * -> POST /api/v1/wallets/{id}/deposit
+     * Header: Idempotency-Key: <any-unique-string>
+     */
+    @PostMapping("/{id}/deposit")
+    public ResponseEntity<TransactionResponse> deposit(
+            @PathVariable Long id,
+            @AuthenticationPrincipal User user,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody MoneyRequest request) {
+        requireIdempotencyKey(idempotencyKey);
+        return ResponseEntity.ok(walletService.deposit(id, request, idempotencyKey, user));
+    }
+
+    /**
+     * WITHDRAW money from a wallet.
+     * -> POST /api/v1/wallets/{id}/withdraw
+     * Header: Idempotency-Key: <any-unique-string>
+     */
+    @PostMapping("/{id}/withdraw")
+    public ResponseEntity<TransactionResponse> withdraw(
+            @PathVariable Long id,
+            @AuthenticationPrincipal User user,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody MoneyRequest request) {
+        requireIdempotencyKey(idempotencyKey);
+        return ResponseEntity.ok(walletService.withdraw(id, request, idempotencyKey, user));
+    }
+
+    private void verifyAccess(Long ownerUserId, User user) {
+        boolean isOwner = ownerUserId.equals(user.getId());
+        boolean isAdmin = user.getRole().name().equals("ADMIN");
+        if (!isOwner && !isAdmin) {
+            throw new AccessDeniedException("You are not allowed to access this wallet");
+        }
+    }
+
+    private void requireIdempotencyKey(String key) {
+        if (!StringUtils.hasText(key)) {
+            throw new InvalidRequestException("Idempotency-Key header is required for money operations");
+        }
     }
 }

@@ -1,10 +1,18 @@
 package com.wallet.wallet;
 
+import com.wallet.common.IdempotencyService;
 import com.wallet.exception.DuplicateResourceException;
+import com.wallet.exception.InsufficientBalanceException;
 import com.wallet.exception.InvalidRequestException;
 import com.wallet.exception.ResourceNotFoundException;
+import com.wallet.transaction.Transaction;
+import com.wallet.transaction.TransactionRepository;
+import com.wallet.transaction.TransactionResponse;
+import com.wallet.transaction.TransactionStatus;
+import com.wallet.transaction.TransactionType;
 import com.wallet.user.User;
 import com.wallet.user.UserRepository;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,10 +24,17 @@ public class WalletService {
 
     private final WalletRepository walletRepository;
     private final UserRepository userRepository;
+    private final TransactionRepository transactionRepository;
+    private final IdempotencyService idempotencyService;
 
-    public WalletService(WalletRepository walletRepository, UserRepository userRepository) {
+    public WalletService(WalletRepository walletRepository,
+                         UserRepository userRepository,
+                         TransactionRepository transactionRepository,
+                         IdempotencyService idempotencyService) {
         this.walletRepository = walletRepository;
         this.userRepository = userRepository;
+        this.transactionRepository = transactionRepository;
+        this.idempotencyService = idempotencyService;
     }
 
     /**
@@ -49,6 +64,141 @@ public class WalletService {
         walletRepository.save(wallet);
 
         return toResponse(wallet);
+    }
+
+    /**
+     * DEPOSIT - add money to a wallet.
+     * ACID: everything inside this @Transactional method either commits together
+     * or rolls back together (balance update + transaction row).
+     */
+    @Transactional
+    public TransactionResponse deposit(Long walletId, MoneyRequest request, String idempotencyKey, User actor) {
+        // 1) Already processed? DB is the source of truth.
+        Transaction existing = findTransaction(walletId, idempotencyKey);
+        if (existing != null) {
+            return TransactionResponse.from(existing);
+        }
+
+        // 2) Redis lock: fast duplicate guard for concurrent identical calls.
+        boolean acquired = idempotencyService.tryAcquire(idempotencyKey);
+        if (!acquired) {
+            // Another request with the same key is running. By the time we get
+            // here the other one may have committed -> re-check the DB.
+            existing = findTransaction(walletId, idempotencyKey);
+            if (existing != null) {
+                return TransactionResponse.from(existing);
+            }
+            throw new InvalidRequestException("A request with idempotency key "
+                    + idempotencyKey + " is already in progress");
+        }
+
+        try {
+            // 3) PESSIMISTIC row lock: blocks concurrent writes to the same wallet.
+            //    Ownership check happens on THIS locked instance (no stale cache).
+            Wallet wallet = walletRepository.findByIdForUpdate(walletId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
+            verifyOwner(wallet, actor);
+
+            BigDecimal newBalance = wallet.getBalance().add(request.getAmount());
+            wallet.setBalance(newBalance);
+            walletRepository.save(wallet);
+
+            Transaction transaction = Transaction.builder()
+                    .wallet(wallet)
+                    .type(TransactionType.DEPOSIT)
+                    .status(TransactionStatus.SUCCESS)
+                    .amount(request.getAmount())
+                    .balanceAfter(newBalance)
+                    .idempotencyKey(idempotencyKey)
+                    .description(request.getDescription())
+                    .build();
+            transactionRepository.save(transaction);
+
+            return TransactionResponse.from(transaction);
+        } catch (DataIntegrityViolationException e) {
+            // Unique constraint (wallet_id, idempotency_key) tripped -> a parallel
+            // identical request inserted it. Return the winner's result.
+            existing = findTransaction(walletId, idempotencyKey);
+            if (existing != null) {
+                return TransactionResponse.from(existing);
+            }
+            throw e;
+        } finally {
+            idempotencyService.release(idempotencyKey);
+        }
+    }
+
+    /**
+     * WITHDRAW - take money out of a wallet.
+     * Balance check happens INSIDE the lock to stay race-free.
+     */
+    @Transactional
+    public TransactionResponse withdraw(Long walletId, MoneyRequest request, String idempotencyKey, User actor) {
+        Transaction existing = findTransaction(walletId, idempotencyKey);
+        if (existing != null) {
+            return TransactionResponse.from(existing);
+        }
+
+        boolean acquired = idempotencyService.tryAcquire(idempotencyKey);
+        if (!acquired) {
+            existing = findTransaction(walletId, idempotencyKey);
+            if (existing != null) {
+                return TransactionResponse.from(existing);
+            }
+            throw new InvalidRequestException("A request with idempotency key "
+                    + idempotencyKey + " is already in progress");
+        }
+
+        try {
+            Wallet wallet = walletRepository.findByIdForUpdate(walletId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
+            verifyOwner(wallet, actor);
+
+            if (wallet.getBalance().compareTo(request.getAmount()) < 0) {
+                throw new InsufficientBalanceException(
+                        "Insufficient balance: have " + wallet.getBalance()
+                                + ", need " + request.getAmount());
+            }
+
+            BigDecimal newBalance = wallet.getBalance().subtract(request.getAmount());
+            wallet.setBalance(newBalance);
+            walletRepository.save(wallet);
+
+            Transaction transaction = Transaction.builder()
+                    .wallet(wallet)
+                    .type(TransactionType.WITHDRAW)
+                    .status(TransactionStatus.SUCCESS)
+                    .amount(request.getAmount())
+                    .balanceAfter(newBalance)
+                    .idempotencyKey(idempotencyKey)
+                    .description(request.getDescription())
+                    .build();
+            transactionRepository.save(transaction);
+
+            return TransactionResponse.from(transaction);
+        } catch (DataIntegrityViolationException e) {
+            existing = findTransaction(walletId, idempotencyKey);
+            if (existing != null) {
+                return TransactionResponse.from(existing);
+            }
+            throw e;
+        } finally {
+            idempotencyService.release(idempotencyKey);
+        }
+    }
+
+    private Transaction findTransaction(Long walletId, String idempotencyKey) {
+        return transactionRepository.findByWalletIdAndIdempotencyKey(walletId, idempotencyKey)
+                .orElse(null);
+    }
+
+    /** Owner or ADMIN may operate on a wallet. */
+    private void verifyOwner(Wallet wallet, User actor) {
+        boolean isOwner = wallet.getUser().getId().equals(actor.getId());
+        boolean isAdmin = actor.getRole().name().equals("ADMIN");
+        if (!isOwner && !isAdmin) {
+            throw new com.wallet.exception.AccessDeniedException("You are not allowed to access this wallet");
+        }
     }
 
     @Transactional(readOnly = true)
