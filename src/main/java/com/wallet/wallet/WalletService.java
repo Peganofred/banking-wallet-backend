@@ -6,6 +6,8 @@ import com.wallet.exception.InsufficientBalanceException;
 import com.wallet.exception.InvalidRequestException;
 import com.wallet.exception.ResourceNotFoundException;
 import com.wallet.transaction.Transaction;
+import com.wallet.transaction.TransactionFilter;
+import com.wallet.transaction.TransactionPageResponse;
 import com.wallet.transaction.TransactionRepository;
 import com.wallet.transaction.TransactionResponse;
 import com.wallet.transaction.TransactionStatus;
@@ -13,10 +15,14 @@ import com.wallet.transaction.TransactionType;
 import com.wallet.user.User;
 import com.wallet.user.UserRepository;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Service
@@ -231,6 +237,48 @@ public class WalletService {
         Wallet wallet = walletRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + id));
         return toResponse(wallet);
+    }
+
+    @Transactional(readOnly = true)
+    public TransactionPageResponse getTransactions(Long walletId, TransactionFilter filter, User actor) {
+        Wallet wallet = walletRepository.findById(walletId)
+                .orElseThrow(() -> new ResourceNotFoundException("Wallet not found with id: " + walletId));
+        verifyOwner(wallet, actor);
+
+        String type = null;
+        if (filter.getType() != null && !filter.getType().isBlank()) {
+            type = filter.getType().toUpperCase();
+        }
+
+        String status = null;
+        if (filter.getStatus() != null && !filter.getStatus().isBlank()) {
+            status = filter.getStatus().toUpperCase();
+        }
+
+        String dateFrom = null;
+        if (filter.getDateFrom() != null && !filter.getDateFrom().isBlank()) {
+            LocalDate.parse(filter.getDateFrom());
+            dateFrom = filter.getDateFrom();
+        }
+
+        String dateTo = null;
+        if (filter.getDateTo() != null && !filter.getDateTo().isBlank()) {
+            LocalDate.parse(filter.getDateTo());
+            dateTo = filter.getDateTo();
+        }
+
+        int page = filter.getPage() != null && filter.getPage() >= 0 ? filter.getPage() : 0;
+        int size = filter.getSize() != null && filter.getSize() > 0 ? Math.min(filter.getSize(), 100) : 20;
+
+        PageRequest pageRequest = PageRequest.of(page, size);
+        Page<Transaction> result = transactionRepository.findByFilters(walletId, type, status, dateFrom, dateTo, pageRequest);
+
+        List<TransactionResponse> content = result.getContent().stream()
+                .map(TransactionResponse::from)
+                .toList();
+
+        return new TransactionPageResponse(content, result.getNumber(), result.getSize(),
+                result.getTotalElements(), result.getTotalPages());
     }
 
     private WalletDtos.WalletResponse toResponse(Wallet wallet) {

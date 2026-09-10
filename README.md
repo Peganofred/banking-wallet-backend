@@ -350,6 +350,76 @@ in a single `@Transactional` — money is always conserved.
    - All should return 200
    - Balances should still sum to original total (conservation check)
 
+---
+
+## Phase 4 - Transaction History / Wallet Statement
+
+### New endpoint
+
+| Method | URL                                    | Auth | Description                          |
+|--------|----------------------------------------|------|--------------------------------------|
+| GET    | `/api/v1/wallets/{id}/transactions`   | JWT  | Paginated transaction history        |
+
+### Query parameters
+
+| Param      | Type   | Default | Description                                              |
+|------------|--------|---------|----------------------------------------------------------|
+| `page`     | int    | 0       | Page number (0-based)                                    |
+| `size`     | int    | 20      | Items per page (max 100)                                 |
+| `type`     | String | all     | DEPOSIT / WITHDRAW / TRANSFER_IN / TRANSFER_OUT          |
+| `status`   | String | all     | SUCCESS / FAILED                                         |
+| `dateFrom` | String | none    | Start date (ISO, e.g. `2026-09-01`)                      |
+| `dateTo`   | String | none    | End date (inclusive, e.g. `2026-09-30`)                  |
+
+### Response
+
+```json
+{
+  "content": [
+    {
+      "id": 5,
+      "walletId": 1,
+      "type": "TRANSFER_OUT",
+      "status": "SUCCESS",
+      "amount": 50.00,
+      "balanceAfter": 900.00,
+      "idempotencyKey": "tx-2",
+      "description": "transfer to wallet 2 - taxi",
+      "createdAt": "2026-09-10T12:30:00.123"
+    }
+  ],
+  "page": 0,
+  "size": 10,
+  "totalElements": 3,
+  "totalPages": 1
+}
+```
+
+### Access rules
+
+- Wallet owner can view their own transactions
+- ADMIN can view any wallet's transactions
+- Other users get **403 Forbidden**
+
+### Phase 4 Postman tests
+
+1. **Basic history** (Alice, wallet 1, 3 transactions):
+   - GET `/api/v1/wallets/1/transactions?page=0&size=10`
+   - Expected: 3 items, newest first, pagination metadata
+
+2. **Type filter** (Bob, only TRANSFER_IN):
+   - GET `/api/v1/wallets/2/transactions?type=TRANSFER_IN`
+   - Expected: 2 items, both type `TRANSFER_IN`
+
+3. **Pagination** (size=2, page 0):
+   - GET `/api/v1/wallets/2/transactions?page=0&size=2`
+   - Expected: 2 items, totalElements=4, totalPages=2
+   - GET `?page=1&size=2` → remaining 2 items
+
+4. **Ownership check**:
+   - Alice's token, GET `/api/v1/wallets/2/transactions`
+   - Expected **403** `You are not allowed to access this wallet`
+
 All handled centrally in:
 - `exception/GlobalExceptionHandler.java` (@RestControllerAdvice)
 - `security/RestAuthErrorHandlers.java` (401/403 for security filters)
@@ -365,7 +435,8 @@ src/main/java/com/wallet/
 ├── exception/       ApiError, ApiException, GlobalExceptionHandler, custom exceptions
 ├── security/        JwtService, JwtAuthFilter, CustomUserDetailsService, RestAuthErrorHandlers
 ├── user/            User, Role, AuthDtos, UserDto, AuthService, AuthController, UserRepository
-├── wallet/          Wallet, WalletDtos, WalletService, WalletController, WalletRepository
-├── transaction/     Transaction, TransactionType, TransactionRepository
+├── wallet/          Wallet, WalletDtos, WalletService, WalletController, WalletRepository, MoneyRequest
+├── transaction/     Transaction, TransactionType, TransactionStatus, TransactionResponse,
+│                    TransactionRepository, TransactionFilter, TransactionPageResponse
 └── transfer/        TransferRequest, TransferService, TransferController
 ```

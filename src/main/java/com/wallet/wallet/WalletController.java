@@ -2,6 +2,8 @@ package com.wallet.wallet;
 
 import com.wallet.exception.AccessDeniedException;
 import com.wallet.exception.InvalidRequestException;
+import com.wallet.transaction.TransactionFilter;
+import com.wallet.transaction.TransactionPageResponse;
 import com.wallet.transaction.TransactionResponse;
 import com.wallet.user.User;
 import jakarta.validation.Valid;
@@ -55,6 +57,18 @@ public class WalletController {
         WalletDtos.WalletResponse wallet = walletService.getWallet(id);
         verifyAccess(wallet.getUserId(), user);
         return ResponseEntity.ok(wallet);
+    }
+
+    /**
+     * Get transaction history for a wallet (paginated, filterable).
+     * -> GET /api/v1/wallets/{id}/transactions?page=0&size=20&type=DEPOSIT&dateFrom=2026-09-01
+     */
+    @GetMapping("/{id}/transactions")
+    public ResponseEntity<TransactionPageResponse> getTransactions(
+            @PathVariable Long id,
+            @ModelAttribute TransactionFilter filter,
+            @AuthenticationPrincipal User user) {
+        return ResponseEntity.ok(walletService.getTransactions(id, filter, user));
     }
 
     /**
