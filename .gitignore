@@ -1,0 +1,41 @@
+# Maven build output
+target/
+*.class
+*.jar
+*.war
+*.ear
+!mvnw
+!mvnw.cmd
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# IntelliJ IDEA
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+application-secret.yml
+
+# Maven wrapper jar (downloads on demand)
+.mvn/wrapper/maven-wrapper.jar
+
+# Local runtime files
+java_pid*.hprof
