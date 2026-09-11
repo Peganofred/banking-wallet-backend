@@ -31,6 +31,11 @@ app:
     expiration-ms: 86400000
   api:
     prefix: /api/v1
+  admin:
+    email: admin@wallet.dev
+    password: admin1234
+    name: Platform Admin
+    auto-create: true
 
 springdoc:
   api-docs:

@@ -44,6 +44,8 @@ public class SecurityConfig {
                         // public endpoints
                         .requestMatchers("/api/v1/auth/register", "/api/v1/auth/login").permitAll()
                         .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/api-docs/**").permitAll()
+                        // admin console endpoints require the ADMIN role
+                        .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         // everything else requires authentication
                         .anyRequest().authenticated()
                 )

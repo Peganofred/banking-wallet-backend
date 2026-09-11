@@ -426,17 +426,78 @@ All handled centrally in:
 
 ---
 
+## Phase 5 - Admin Panel
+
+An ADMIN-only console for managing users, wallets and transactions.
+
+### Auto-created admin account
+
+On startup, if `app.admin.auto-create` is `true` and no user with `app.admin.email`
+exists, the app seeds an ADMIN account:
+
+| Property        | Default            |
+|-----------------|--------------------|
+| app.admin.email | `admin@wallet.dev` |
+| app.admin.password | `admin1234`     |
+| app.admin.name   | `Platform Admin`  |
+| app.admin.auto-create | `true`         |
+
+Login: `POST /api/v1/auth/login` with those credentials, use the JWT for the
+`Authorization: Bearer <token>` header.
+
+### Endpoints (all require the ADMIN role)
+
+| Method | Path                                | Description                     |
+|--------|-------------------------------------|---------------------------------|
+| GET    | `/api/v1/admin/users`               | Paginated list of all users     |
+| GET    | `/api/v1/admin/users/{id}`          | Single user                     |
+| GET    | `/api/v1/admin/users/{id}/wallets`  | All wallets of a user           |
+| GET    | `/api/v1/admin/wallets`             | Paginated list of all wallets   |
+| GET    | `/api/v1/admin/wallets/{id}/transactions` | Any wallet's history     |
+| PATCH  | `/api/v1/admin/users/{id}/role`     | Change role (`USER`/`ADMIN`)    |
+
+`/api/v1/admin/**` is locked to `ADMIN` in `SecurityConfig`; a normal USER token
+gets **403**.
+
+### Phase 5 Postman tests
+
+1. **Admin login**: `POST /api/v1/auth/login` with `admin@wallet.dev` / `admin1234`
+   - Expected: 200, response `role` = `ADMIN`
+2. **List users**: `GET /api/v1/admin/users?page=0&size=10` (admin token)
+   - Expected: paginated `content` of users
+3. **List wallets**: `GET /api/v1/admin/wallets`
+   - Expected: all wallets with balances
+4. **User wallets**: `GET /api/v1/admin/users/1/wallets`
+5. **Wallet history**: `GET /api/v1/admin/wallets/1/transactions`
+   - Expected: transaction list (works for any wallet, no ownership restriction)
+6. **Role change**: `PATCH /api/v1/admin/users/1/role` body `{"role":"ADMIN"}`
+   - Expected: updated user with `role: ADMIN`
+   - Invalid role (`{"role":"SUPERUSER"}`) -> **400**
+7. **Access control**: USER token on `GET /api/v1/admin/users`
+   - Expected **403**
+
+### Notes
+
+- `wallet/WalletRepository.credit` / `debitIfSufficient` use
+  `@Modifying(clearAutomatically = true, flushAutomatically = true)` so the fresh
+  balance is re-read after the atomic SQL update (`balanceAfter` in transaction
+  rows is always current).
+
+---
+
 ## Phase 1 Structure
 
 ```
 src/main/java/com/wallet/
 ├── DigitalWalletApplication.java
-├── config/          SecurityConfig, JwtProperties, AppProperties
+├── config/          SecurityConfig, JwtProperties, AppProperties, AdminProperties, AdminSeeder
 ├── exception/       ApiError, ApiException, GlobalExceptionHandler, custom exceptions
 ├── security/        JwtService, JwtAuthFilter, CustomUserDetailsService, RestAuthErrorHandlers
 ├── user/            User, Role, AuthDtos, UserDto, AuthService, AuthController, UserRepository
 ├── wallet/          Wallet, WalletDtos, WalletService, WalletController, WalletRepository, MoneyRequest
 ├── transaction/     Transaction, TransactionType, TransactionStatus, TransactionResponse,
 │                    TransactionRepository, TransactionFilter, TransactionPageResponse
+├── admin/           AdminDtos, AdminService, AdminController
+├── common/          PagedResponse
 └── transfer/        TransferRequest, TransferService, TransferController
 ```

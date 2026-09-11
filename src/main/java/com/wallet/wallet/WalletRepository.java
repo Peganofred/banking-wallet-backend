@@ -30,7 +30,7 @@ public interface WalletRepository extends JpaRepository<Wallet, Long> {
      *   1  -> money debited
      *   0  -> wallet does not exist OR insufficient balance
      */
-    @Modifying
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query(value = "update wallets set balance = balance - :amount " +
             "where id = :id and balance >= :amount", nativeQuery = true)
     int debitIfSufficient(@Param("id") Long id, @Param("amount") BigDecimal amount);
@@ -39,7 +39,7 @@ public interface WalletRepository extends JpaRepository<Wallet, Long> {
      * ATOMIC credit: balance = balance + :amount.
      * Returns number of rows updated (1 = success, 0 = wallet missing).
      */
-    @Modifying
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query(value = "update wallets set balance = balance + :amount where id = :id", nativeQuery = true)
     int credit(@Param("id") Long id, @Param("amount") BigDecimal amount);
 }
