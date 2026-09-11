@@ -14,7 +14,9 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
+import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -132,6 +134,23 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Handler for badly-formatted query params & path variables.
+     * e.g. /transactions?dateFrom=junk  or  /wallets/abc
+     * -> 400 BAD REQUEST
+     */
+    @ExceptionHandler({
+            DateTimeParseException.class,
+            MethodArgumentTypeMismatchException.class
+    })
+    public ResponseEntity<ApiError> handleBadParameter(Exception ex, WebRequest request) {
+        HttpStatus status = HttpStatus.BAD_REQUEST;
+        String path = getPath(request);
+        String message = "Invalid parameter value: " + rootMessage(ex);
+        ApiError error = ApiError.of(status.value(), status.getReasonPhrase(), message, path);
+        return ResponseEntity.status(status).body(error);
+    }
+
+    /**
      * Catch-all handler for any unhandled exception.
      * Prevents sensitive details from leaking to the client.
      * -> 500 INTERNAL SERVER ERROR
@@ -143,6 +162,14 @@ public class GlobalExceptionHandler {
         String path = getPath(request);
         ApiError error = ApiError.of(status.value(), status.getReasonPhrase(), "An unexpected error occurred", path);
         return ResponseEntity.status(status).body(error);
+    }
+
+    private String rootMessage(Exception ex) {
+        Throwable t = ex;
+        while (t.getCause() != null) {
+            t = t.getCause();
+        }
+        return t.getMessage() != null ? t.getMessage() : ex.getClass().getSimpleName();
     }
 
     private String getPath(WebRequest request) {
